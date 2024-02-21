@@ -1,0 +1,156 @@
+---
+title: "Data Exploration Assignment - Econometrics"
+author: "Erin Ankerson"
+format: 
+  docx:
+    warning: false
+    message: false
+editor: visual
+---
+
+## Packages
+
+```{r}
+library(dplyr)
+library(vtable)
+library(rio)
+library(stringr)
+library(lubridate)
+library(fixest)
+library(ggplot2)
+```
+
+## Data Cleaning
+
+### Scorecard Data
+
+```{r}
+# Import College Scorecard data
+scorecard_data <- import("Lab3_Rawdata\\Most+Recent+Cohorts+(Scorecard+Elements).csv")
+ # Remove duplicates
+sc_data_cleaned <- scorecard_data %>%
+  group_by(INSTNM) %>%
+  filter(row_number() == 1)
+ # Remove universities that do not predominantly grant bachelor's degrees
+sc_data_cleaned <- sc_data_cleaned %>%
+  filter(PREDDEG == '3')
+
+# Import ID Scorecard data to match colleges with data
+ID_data <- import("Lab3_Rawdata\\id_name_link.csv")
+
+# Check for any duplicate 'schnames' in ID_data
+schname_duplicates <- ID_data %>%
+  group_by(schname) %>%
+  summarize(count = n()) %>%
+  filter(count >=2)
+print(schname_duplicates)
+ # Remove duplicates from the ID_data
+ID_data_cleaned <- anti_join(ID_data, schname_duplicates, by = 'schname')
+   # Check the data for the names
+ID_dup_check <- schname_duplicates %>%
+  filter(schname %in% ID_data_cleaned)
+ID_dup_check
+
+```
+
+### Trends Data
+
+```{r}
+# Import "Trends Up To" Files and bind them into one dataset
+file_names <- list.files(path = "C:\\Users\\Jean\\Documents\\2024 Winter Quarter\\Econometrics\\Projects and Data\\Lab3_Rawdata\\trends_up_to", pattern = "\\.csv$", full.names = TRUE)
+
+trends_up_to_data <- import_list(file_names, rbind = TRUE)
+
+trends_clean <- trends_up_to_data
+
+
+# Dates
+# Get the first 10 characters out of monthorweek variable
+trends_clean$monthorweek <- str_sub(trends_clean$monthorweek, 1, 10)
+
+# Turn monthorweek string into usable date
+trends_clean$monthorweek <- ymd(trends_clean$monthorweek)
+class(trends_clean$monthorweek)
+
+
+# Aggregate further to round down to the first of each month
+trends_clean$monthorweek <- floor_date(trends_clean$monthorweek, unit = c("month"))
+
+# Aggregate index variable
+#Standardize the index variable
+trends_clean <- trends_clean %>%
+  group_by(schname, keyword) %>%
+  mutate(index = (index - mean(index, na.rm = TRUE)) / sd(index, na.rm = TRUE))
+## Now a one-unit change in the standardized index can be understood and interpreted as a one-standard-deviation change in search interest
+
+```
+
+I summarized the "monthorweek" variable to round down to the first of the month for each data point.
+
+### Combine Data
+
+```{r}
+Trends_ID <- inner_join(trends_clean, ID_data_cleaned, by = c('schname' = 'schname'))
+
+data <- inner_join(Trends_ID, sc_data_cleaned, by = c('unitid' = 'UNITID'))
+
+# Note: The College Scorecard was released on September 12, 2015.
+# Differences-in-differences
+
+data$post_treatment <- as.numeric(data$monthorweek >= "2015-10-01")
+
+# Convert md_earn_wne column to numeric
+data$`md_earn_wne_p10-REPORTED-EARNINGS` <- as.numeric(as.character(data$`md_earn_wne_p10-REPORTED-EARNINGS`))
+
+mean_md_earn_wne <- mean(data$`md_earn_wne_p10-REPORTED-EARNINGS`, na.rm = TRUE)
+
+# Treated Colleges = Colleges above the mean of the median earnings
+data$treated_colleges <- ifelse(data$`md_earn_wne_p10-REPORTED-EARNINGS` >= mean_md_earn_wne, 1, 0)
+
+# Remove NA
+data <- na.omit(data)
+
+sumtable(data)
+```
+
+The data starts in 2013, but according to my research, the College Scorecard was started on September 12, 2015. To take into account the major change after September 2015, I used difference-in-differences to create a post_treatment variable.
+
+In the post_treatment variable, 1 = equal or greater than October 2015 and 0 = before October 2015.
+
+To address "high-earning" vs. "low-earning" colleges, I found the mean of the variable "md_earn_wne_p10-REPORTED-EARNINGS". Anything above the mean is "high-earning" and anything below is "low-earning". I saved this as a binary variable called "treated_colleges" where 1 = high-earning and 0 = low-earning.
+
+## Analysis
+
+### Research Question:
+
+Among colleges that predominantly grant bachelor's degrees, did the release of the Scorecard shift student interest to high-earnings colleges relative to low-earnings ones?
+
+### Regression
+
+The regression I chose to use utilizes the standardized index for the Google Trends, as well as the post_treatment variable to take into account before and after the College Scorecard was implemented and the treated_colleges variable to take into account high vs. low earning colleges.
+
+We are wondering if the release of the Scorecard shift student interest to high-earnings colleges relative to low-earnings ones, so the post_treatment and treated_colleges variables help take into account the before and after the Scorecard was implemented and what constitutes a high vs low earning college.
+
+```{r}
+model <- feols(data = data, index ~ post_treatment*treated_colleges)
+
+etable(model)
+```
+
+### Graph
+
+```{r}
+# Graph of data
+
+ggplot(data, aes(x = post_treatment, y = index, color = factor(treated_colleges))) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Post Treatment", y = "Index", color = "Treated Colleges", title = "Index vs. Post Treatment by Treated Colleges") + 
+  theme_minimal()
+```
+
+I graphed the model to see the effect of the Index vs. Post Treatment. The 0 represents before the implementation, and the 1 represents afterwards. The graph shows that the Index increased for high-earning colleges after the Scorecard was implemented and the Index decreased for low-earning colleges.
+
+### Answering Research Question
+
+The introduction of the College Scorecard increased the search activity on Google Trends for colleges with high-earning graduates by .0173 standard deviations relative to what it did for colleges with low-earning graduates, with a standard error of .0026. This result comes from the treated_colleges coefficient in my regression.
